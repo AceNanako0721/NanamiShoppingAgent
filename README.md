@@ -58,12 +58,16 @@ Public networking is disabled by default. Set `"live_reads": true` in the privat
 | --- | --- | --- | --- |
 | Rakuten Japan | Public listing links, bounded and paginated | Partial structured fields; unknown fees/specifications remain unknown | Disabled |
 | Yahoo! Flea Market | Public listing links, bounded and paginated | Partial structured fields; unknown fees/specifications remain unknown | Disabled |
-| Amazon Japan | Public GET entry; response-size boundary may block | Entry implemented, extractor unverified | Disabled |
+| Amazon Japan | Public search-result card titles and canonical ASIN links; at most 20 candidates | Unverified; inspect returns a controlled blocker | Disabled |
 | Mercari Japan | Public GET entry; client-rendered results unverified | Entry implemented, extractor unverified | Disabled |
 | PDD Japan free-shipping area | Public GET entry only; Japan-specific section unverified | Exact variant and Japan eligibility unverified | Disabled |
 | Synthetic loopback shop | Browser verified | Browser verified | Independent synthetic operator grant only |
 
 A successful homepage or HTTP 200 never proves search, shipping eligibility or checkout support. Page changes can return a controlled handoff at any time. These are engineering capability limits; account access and purchase authorization are separate future external dependencies.
+
+Amazon search has been exercised through an actual MCP stdio subprocess. Its `ready` flag covers the search layer only. Identifiable sponsored cards are excluded; the remaining candidates carry `search_result_rank_unverified` and do not claim organic rank. Price, SKU, variant, seller, condition, delivery and fees stay unknown. Evidence includes the fetched URL, time, response hash and card ASIN; an ASIN is not proof of an exact purchasable SKU. Product inspection and complete landed-price comparison remain unverified.
+
+Amazon public HTML is capped at 4 MB; other platforms retain 2 MB. Reads use 64 KiB chunks, a 24-second body/redirect deadline and 12-second socket timeouts. Amazon parsing additionally caps start tags at 20,000, nesting at 96, result cards at 100 and parsing time at 2 seconds, checked periodically. No trusted cards, challenge pages or exceeded limits produce a controlled handoff. Slug/ref links are normalized only after validating the fetched source and the product href; arbitrary query parameters cannot supply an ASIN or expand network routes.
 
 ## Tools and workflow
 

@@ -12,6 +12,6 @@
 
 shopping_get_task 可跨进程接续并分页读取候选。shopping_get_order 只能读取或用持久商家收据对账，不会再次提交。submitting/uncertain 始终保留目标锁和预算占额；cancel_task 不承诺撤销商家已接受的订单。
 
-显式只读联网 smoke：`python scripts/live_smoke.py --allow-public-network`。它不属于默认测试或 CI，不登录、不保存 cookie、不绕过验证码。乐天和 Yahoo 支持公开商品链接与部分结构化字段；Amazon、Mercari、PDD 不宣称候选提取已就绪。PDD 日本包邮必须验证具体规格及结算证据，当前尚未实现。
+显式只读联网 smoke：`python scripts/live_smoke.py --allow-public-network`。它直接调用 adapter，不代表 MCP 链路验收；不属于默认测试或 CI，不登录、不保存 cookie、不绕过验证码。乐天和 Yahoo 支持公开商品链接与部分结构化字段；Amazon 的公开搜索已通过真实 MCP stdio 子进程验证，只提取结果卡标题与规范化 ASIN 链接，最多 20 项。已识别广告会被排除，其余结果仍明确标记排名未知，不声称自然排名。商品详情检查返回 adapter_unverified；价格、运费、配送、SKU 等保持未知，不能据此比较完整到手价。Mercari、PDD 的候选提取仍未就绪；PDD 日本包邮必须验证具体规格及结算证据，当前尚未实现。
 
 HTTP、多用户隔离部署及真实主人授权集成均为后续工作。本版本的权限边界是受信任本地运维人员控制的进程配置；不能抵抗拥有相同操作系统用户权限并能直接修改 SQLite 的恶意宿主。

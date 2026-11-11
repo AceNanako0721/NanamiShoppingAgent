@@ -147,7 +147,8 @@ class Service:
                         platform=candidate["platform"],
                         price=candidate.get("price"),
                         currency=candidate["currency"],
-                        uncertainty=["final_checkout_required"],
+                        uncertainty=list(candidate.get("uncertainty", []))
+                        + ["final_checkout_required"],
                     )
                 )
             if result.get("blocked_reason"):
