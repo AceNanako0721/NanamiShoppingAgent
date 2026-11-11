@@ -1,6 +1,7 @@
 """Domain orchestration. Transport and host reasoning are external."""
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from jsonschema import Draft202012Validator
@@ -31,11 +32,18 @@ class Service:
         self.store, self.synthetic, self.live = store, synthetic, live
 
     def call(self, name, args):
-        task = args.get("task_id") if isinstance(args, dict) else None
+        supplied_task = args.get("task_id") if isinstance(args, dict) else None
+        task = (
+            supplied_task
+            if isinstance(supplied_task, str) and re.fullmatch(r"task_[a-f0-9]{32}", supplied_task)
+            else None
+        )
         try:
             if name not in TOOLS:
                 raise Invalid("unknown_tool")
             strict_json(json.dumps(args, allow_nan=False))
+            if isinstance(args, dict) and "task_id" in args and task is None:
+                raise Invalid()
             if not Draft202012Validator(TOOLS[name]["inputSchema"]).is_valid(args):
                 raise Invalid()
             if task:

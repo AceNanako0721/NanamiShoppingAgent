@@ -53,8 +53,28 @@ class SyntheticAdapter:
             raise Invalid("unsafe_navigation")
         return url
 
+    def _purchase_request(self, request, expected):
+        if (
+            request.method != "POST"
+            or request.url != self.origin + "/purchase"
+            or request.headers.get("content-type", "").lower()
+            != "application/x-www-form-urlencoded"
+        ):
+            raise Invalid("unsafe_navigation")
+        raw = request.post_data
+        try:
+            if not isinstance(raw, str) or len(raw.encode("utf-8", errors="strict")) > 4096:
+                raise Invalid()
+            fields = parse_qsl(
+                raw, keep_blank_values=True, strict_parsing=True, errors="strict", max_num_fields=3
+            )
+        except (ValueError, UnicodeError) as exc:
+            raise Invalid() from exc
+        if len(fields) != 3 or dict(fields) != {k: str(v) for k, v in expected.items()}:
+            raise Invalid()
+
     @contextmanager
-    def page(self, dispatch=False):
+    def page(self, dispatch=None, expires_at=None):
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
@@ -63,18 +83,43 @@ class SyntheticAdapter:
                 java_script_enabled=False, service_workers="block", accept_downloads=False
             )
             context.set_default_timeout(5000)
+            checkout_sent, purchase_sent, blocked = False, False, None
 
             def guard(route):
+                nonlocal checkout_sent, purchase_sent, blocked
                 try:
-                    self.allowed(route.request.url, route.request.method, dispatch)
+                    request = route.request
+                    self.allowed(request.url, request.method, dispatch is not None)
+                    if dispatch is not None:
+                        checkout = self.origin + "/checkout?" + urlencode(dispatch)
+                        if (
+                            not checkout_sent
+                            and request.method == "GET"
+                            and request.url == checkout
+                        ):
+                            checkout_sent = True
+                        else:
+                            if not checkout_sent or purchase_sent:
+                                raise Invalid("unsafe_navigation")
+                            self._purchase_request(request, dispatch)
+                            # click() may have waited for actionability after the DOM review.
+                            # Check at the last boundary before releasing the actual POST.
+                            if expires_at is None or expires_at <= time.time():
+                                raise Invalid("quote_expired")
+                            purchase_sent = True
                     route.continue_()
-                except Invalid:
+                except Invalid as exc:
+                    blocked = exc
                     route.abort()
 
             context.route("**/*", guard)
             page = context.new_page()
             try:
                 yield page
+            except Exception:
+                if blocked is not None:
+                    raise blocked
+                raise
             finally:
                 context.close()
                 browser.close()
@@ -142,7 +187,7 @@ class SyntheticAdapter:
 
     def commit(self, task, quote):
         args = dict(task=task, hash=digest(quote), quantity=quote["quantity"])
-        with self.page(dispatch=True) as page:
+        with self.page(dispatch=args, expires_at=quote["expires_at"]) as page:
             page.goto(self.origin + "/checkout?" + urlencode(args))
             product = self._product(page, quote["evidence"])
             final = exact_quote(product, quote["constraints"])

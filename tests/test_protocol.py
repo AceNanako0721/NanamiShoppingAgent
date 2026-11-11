@@ -102,3 +102,45 @@ def test_independent_wire_client_and_duplicate_json_rejection(tmp_path):
         "task_state": "created",
         "duplicate_rejected": True,
     }
+
+
+INVALID_TASK_IDS = [
+    {"password": "SYNTHETIC_SECRET_MARKER"},
+    ["SYNTHETIC_SECRET_MARKER"],
+    True,
+    False,
+    7,
+    1.5,
+    "SYNTHETIC_SECRET_MARKER" * 20,
+    "SYNTHETIC_SECRET_MARKER",
+    "task_" + "a" * 31,
+    "task_" + "a" * 32 + "\n",
+]
+
+
+def assert_invalid_task_result(result):
+    from jsonschema import Draft202012Validator
+
+    from nanami_shopping.contract import TOOLS
+
+    Draft202012Validator(TOOLS["shopping_get_task"]["outputSchema"]).validate(result)
+    assert result["task_id"] is None
+    assert result["blocked_reason"] == "invalid_input"
+    assert "SYNTHETIC_SECRET_MARKER" not in json.dumps(result)
+    assert result["data"] == {} and result["evidence_refs"] == []
+
+
+async def test_sdk_invalid_task_ids_do_not_echo_and_follow_output_schema(tmp_path):
+    cfg, _, _ = config(tmp_path)
+    async with Client(params(cfg)) as client:
+        for task_id in INVALID_TASK_IDS:
+            result = await client.call_tool("shopping_get_task", {"task_id": task_id})
+            assert_invalid_task_result(result.structured_content)
+            assert all("SYNTHETIC_SECRET_MARKER" not in c.text for c in result.content)
+        for task_id in ["task_" + "a" * 32]:
+            result = (
+                await client.call_tool("shopping_get_task", {"task_id": task_id})
+            ).structured_content
+            assert result["task_id"] == task_id
+            assert result["blocked_reason"] == "not_authorized"
+            assert result["data"] == {} and result["evidence_refs"] == []

@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -68,3 +69,31 @@ def test_private_state_files_reject_symlinks_and_hardlinks(tmp_path):
     os.link(source, hard)
     with pytest.raises(Invalid):
         private_file(hard)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"\\ud800"',
+        '"\\udfff"',
+        '{"nested":[{"\\ud800":"ok"}]}',
+        '{"nested":[{"ok":"\\udfff"}]}',
+        '"\ud800"',
+        '{"\udfff":"ok"}',
+    ],
+)
+def test_decoded_json_strings_and_keys_require_strict_utf8(raw):
+    with pytest.raises(Invalid):
+        strict_json(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"\\ud83d\\ude00"',
+        '"😀"',
+        '{"nested":[{"\\ud83d\\ude00":"😀"}]}',
+    ],
+)
+def test_json_preserves_valid_non_bmp_strings_and_keys(raw):
+    assert strict_json(raw) == json.loads(raw)

@@ -16,6 +16,8 @@ Use ordinary initialize, tools/list and tools/call. No special client callbacks 
 
 All object schemas reject additional properties. JSON frames are limited to 64 KiB, depth 16 and 2048 values; duplicate keys, NaN/Infinity and invalid UTF-8 are rejected before dispatch. Quantity is an integer from 1 to 100, never a boolean. Monetary strings allow JPY integer units or CNY cents, no exponent/negative/nonfinite values. Default result pages contain at most 20 candidates. Inputs are also validated inside the domain service for non-MCP callers.
 
+UTF-8 validation includes decoded strings and dictionary keys throughout the frame, including JSON-RPC IDs. Escaped lone surrogates receive a generic parse error; the connection remains usable. Valid surrogate pairs and non-BMP characters are accepted. Error envelopes return `task_id: null` unless the supplied value matches the complete `task_<32 lowercase hex digits>` format; invalid objects and strings are never copied into results.
+
 | Tool | Required input | Result/purpose |
 | --- | --- | --- |
 | shopping_capabilities | none | Per-platform layers, blockers and enabled transports |

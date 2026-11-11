@@ -15,8 +15,11 @@ class Invalid(ValueError):
 
 
 def strict_json(raw):
-    if not isinstance(raw, str) or len(raw.encode()) > 65536:
-        raise Invalid()
+    try:
+        if not isinstance(raw, str) or len(raw.encode("utf-8", errors="strict")) > 65536:
+            raise Invalid()
+    except UnicodeError as exc:
+        raise Invalid() from exc
 
     def pairs(items):
         result = {}
@@ -34,6 +37,12 @@ def strict_json(raw):
         raise Invalid() from exc
     count = 0
 
+    def utf8(value):
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise Invalid() from exc
+
     def check(item, depth=0):
         nonlocal count
         count += 1
@@ -43,6 +52,7 @@ def strict_json(raw):
             for key, v in item.items():
                 if len(key) > 256:
                     raise Invalid()
+                utf8(key)
                 check(v, depth + 1)
         elif isinstance(item, list):
             for v in item:
@@ -52,6 +62,8 @@ def strict_json(raw):
 
             if not math.isfinite(item):
                 raise Invalid()
+        elif isinstance(item, str):
+            utf8(item)
 
     check(value)
     return value
