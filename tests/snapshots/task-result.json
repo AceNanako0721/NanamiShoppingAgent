@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "task_id": "<task>",
+  "state": "created",
+  "summary": "created",
+  "data": {
+    "constraints": {
+      "task_id": "<task>",
+      "state": "created",
+      "budget": "pool",
+      "maximum": "1000",
+      "currency": "JPY",
+      "destination": "dest-test",
+      "payment": "pay-test",
+      "quantity": 1
+    },
+    "candidates": [],
+    "next_offset": null
+  },
+  "evidence_refs": [],
+  "blocked_reason": null,
+  "allowed_next_actions": [
+    "shopping_search",
+    "shopping_cancel_task"
+  ],
+  "retry": {
+    "safe": false,
+    "after_seconds": null
+  }
+}
