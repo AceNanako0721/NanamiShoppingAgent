@@ -3,7 +3,7 @@
 import hashlib
 import re
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .domain import exact_quote
@@ -107,15 +107,30 @@ class SyntheticAdapter:
                             if expires_at is None or expires_at <= time.time():
                                 raise Invalid("quote_expired")
                             purchase_sent = True
-                    route.continue_()
+                    # continue_() lets Chromium follow 3xx without re-entering this guard, which
+                    # would replay a GET or the full POST body to any origin. Fetch unredirected.
+                    response = route.fetch(max_redirects=0)
+                    if 300 <= response.status < 400:
+                        raise Invalid("unsafe_navigation")
+                    route.fulfill(response=response)
                 except Invalid as exc:
-                    blocked = exc
+                    # Only a document/form navigation explains a failed step; a blocked image or
+                    # stylesheet must not replace a later quote_changed or quote_expired.
+                    if blocked is None or route.request.is_navigation_request():
+                        blocked = exc
                     route.abort()
+                except Exception:
+                    # Transport failure: release nothing further; commit stays dispatch_uncertain.
+                    with suppress(Exception):
+                        route.abort()
 
             context.route("**/*", guard)
             page = context.new_page()
             try:
                 yield page
+            except Invalid:
+                # The caller's own review result (quote_changed, quote_expired, ...) is decisive.
+                raise
             except Exception:
                 if blocked is not None:
                     raise blocked

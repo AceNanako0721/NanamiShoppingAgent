@@ -1,4 +1,8 @@
-"""Real Chromium requests; every network route is fulfilled or aborted locally."""
+"""Real Chromium requests; every network route is fulfilled or aborted locally.
+
+Route.fetch is intercepted in-process, so a request counts as released only when the production
+guard asks to fetch it; nothing reaches a socket and Route.continue_ must never be used.
+"""
 
 import html
 import json
@@ -30,11 +34,12 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
     quote_id = store.quote(task, quote, ttl)
     quote = store.get(task, quote_id, "quote")
     store.grant(quote_id)
-    events = {"created": [], "continued": [], "aborted": [], "reviewed": []}
+    events = {"created": [], "continued": [], "aborted": [], "reviewed": [], "passthrough": []}
     events["approved_at"] = time.time()
     events["expires_at"] = quote["expires_at"]
     original_context = Browser.new_context
     original_abort = Route.abort
+    original_fulfill = Route.fulfill
     original_product = adapter._product
 
     def record(request):
@@ -51,7 +56,17 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
         events["aborted"].append(record(route.request))
         return original_abort(route, *args, **kwargs)
 
-    def continue_locally(route, *args, **kwargs):
+    def continue_unguarded(route, *args, **kwargs):
+        events["passthrough"].append(record(route.request))
+        return original_abort(route)
+
+    def fulfill(route, *args, response=None, **kwargs):
+        if isinstance(response, LocalResponse):
+            return original_fulfill(route, **response.fields)
+        return original_fulfill(route, *args, response=response, **kwargs)
+
+    def fetch_locally(route, *args, **kwargs):
+        assert kwargs.get("max_redirects") == 0, "guard must not let fetch follow redirects"
         request = route.request
         events["continued"].append(record(request))
         if request.method == "GET" and urlsplit(request.url).path == "/checkout":
@@ -81,7 +96,11 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
                 enctype = "multipart/form-data"
             elif mutation == "origin":
                 button = 'formaction="http://127.0.0.1:12346/purchase"'
-            style = ""
+            shown, style = product, ""
+            if mutation == "subresource_changed":
+                # A blocked non-essential image must not mask the later review failure.
+                shown = {**product, "price": "101"}
+                style = '<img src="/blocked-pixel.png" alt="SYNTHETIC">'
             if mutation == "animation":
                 style = """<style>@keyframes moving {from {transform:translateX(0)}
                     to {transform:translateX(80px)}}
@@ -92,11 +111,11 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
             )
             body = (
                 "<h1>SYNTHETIC — no real goods</h1>"
-                f'<div data-product-json="{html.escape(json.dumps(product), quote=True)}"></div>'
+                f'<div data-product-json="{html.escape(json.dumps(shown), quote=True)}"></div>'
                 f'{style}<form action="{action}" method="{method}" enctype="{enctype}">{inputs}'
                 f'<button id="synthetic-final-submit" {button}>SYNTHETIC purchase</button></form>'
             )
-            return route.fulfill(status=200, content_type="text/html", body=body)
+            return LocalResponse(status=200, content_type="text/html", body=body)
         if request.method == "POST":
             receipt = dict(
                 synthetic=True,
@@ -115,10 +134,10 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
                     )
                 },
             )
-            return route.fulfill(
+            return LocalResponse(
                 status=200, content_type="application/json", body=json.dumps(receipt)
             )
-        return route.fulfill(status=404, body="SYNTHETIC blocked fixture")
+        return LocalResponse(status=404, body="SYNTHETIC blocked fixture")
 
     def reviewed(*args, **kwargs):
         result = original_product(*args, **kwargs)
@@ -126,7 +145,9 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
         return result
 
     monkeypatch.setattr(Browser, "new_context", new_context)
-    monkeypatch.setattr(Route, "continue_", continue_locally)
+    monkeypatch.setattr(Route, "continue_", continue_unguarded)
+    monkeypatch.setattr(Route, "fetch", fetch_locally)
+    monkeypatch.setattr(Route, "fulfill", fulfill)
     monkeypatch.setattr(Route, "abort", abort)
     monkeypatch.setattr(adapter, "_product", reviewed)
     result = Service(store, adapter).call(
@@ -134,7 +155,16 @@ def intercepted_purchase(tmp_path, monkeypatch, mutation="normal", ttl=120):
     )
     # These are synthetic timestamps and generated refs, suitable for private test evidence.
     print(json.dumps(dict(scenario=mutation, events=events, result=result), ensure_ascii=True))
+    assert events["passthrough"] == [], "a route bypassed the redirect-checking fetch"
     return store, task, quote_id, result, events
+
+
+class LocalResponse:
+    """Stands in for the APIResponse returned by Route.fetch; fulfilled without a network."""
+
+    def __init__(self, **fields):
+        self.fields = fields
+        self.status = fields["status"]
 
 
 def posts(events, kind):
@@ -189,6 +219,16 @@ def test_valid_final_request_is_released_once(tmp_path, monkeypatch):
         task=task, hash=result["data"]["receipt"]["quote_hash"], quantity="1"
     )
     assert store.reserved("pool") == "120"
+
+
+def test_aborted_subresource_does_not_mask_review_change(tmp_path, monkeypatch):
+    store, task, quote_id, result, events = intercepted_purchase(
+        tmp_path, monkeypatch, "subresource_changed"
+    )
+    assert any(r["url"].endswith("/blocked-pixel.png") for r in events["aborted"])
+    assert posts(events, "created") == []
+    assert result["blocked_reason"] == "quote_changed", result
+    assert_conservative_claim(store, task, quote_id)
 
 
 def test_quote_expiring_during_click_actionability_never_releases_post(tmp_path, monkeypatch):

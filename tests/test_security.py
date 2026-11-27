@@ -97,3 +97,20 @@ def test_decoded_json_strings_and_keys_require_strict_utf8(raw):
 )
 def test_json_preserves_valid_non_bmp_strings_and_keys(raw):
     assert strict_json(raw) == json.loads(raw)
+
+
+@pytest.mark.parametrize("name", ["shopping_capabilities", "shopping_unknown"])
+def test_error_envelope_echoes_task_only_for_tools_that_accept_it(tmp_path, name):
+    from test_store import make_store, setup_target
+
+    from nanami_shopping.service import Service
+
+    store = make_store(tmp_path / "state")
+    task = setup_target(store)
+    result = Service(store).call(name, {"task_id": task})
+    assert result["state"] == "blocked"
+    assert result["task_id"] is None
+    assert result["allowed_next_actions"] == []
+    # The echo remains for tools whose schema declares task_id.
+    accepted = Service(store).call("shopping_get_task", {"task_id": task, "extra": 1})
+    assert accepted["task_id"] == task

@@ -21,6 +21,7 @@ class Shop:
         self.broken_dom = False
         self.drop_response = False
         self.block_after_accept = None
+        self.redirects = {}  # path -> (status, absolute Location); fault injection only.
         self.accepted = threading.Event()
         self.clicks = 0
         self.lock = threading.Lock()
@@ -63,7 +64,19 @@ def handler(shop):
             self.end_headers()
             self.wfile.write(raw)
 
+        def redirect(self):
+            target = shop.redirects.get(urlsplit(self.path).path)
+            if target is None:
+                return False
+            self.send_response(target[0])
+            self.send_header("Location", target[1])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+
         def do_GET(self):
+            if self.redirect():
+                return None
             u = urlsplit(self.path)
             args = parse_qs(u.query)
             if u.path == "/search":
@@ -104,6 +117,8 @@ def handler(shop):
             self.respond("SYNTHETIC not found", 404)
 
         def do_POST(self):
+            if self.redirect():
+                return None
             if self.path != "/purchase":
                 return self.respond("SYNTHETIC disallowed", 405)
             body = self.rfile.read(min(int(self.headers.get("Content-Length", "0")), 4096)).decode()

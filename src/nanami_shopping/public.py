@@ -90,7 +90,10 @@ def allowed_url(platform, url, method="GET"):
 
 
 def public_addresses(ips):
-    if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+    # ipaddress reports multicast (224.0.0.0/4, ff00::/8) as global; it is never a web origin.
+    if not ips or any(
+        not (addr := ipaddress.ip_address(ip)).is_global or addr.is_multicast for ip in ips
+    ):
         raise Invalid("unsafe_network")
     return ips
 
@@ -113,12 +116,19 @@ def fetch_public(platform, url):
     # Measured Amazon search HTML exceeds 2 MB; keep other platforms' existing bound.
     limit = 4_000_000 if platform == "amazon" else 2_000_000
     deadline = time.monotonic() + 24
-    for _ in range(4):
-        if time.monotonic() >= deadline:
+
+    def timeout():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise Invalid("response_timeout")
+        return min(12, max(0.001, remaining))
+
+    for _ in range(4):
         allowed_url(platform, url)
         u = urlsplit(url)
-        connection = PinnedHTTPS(u.hostname, timeout=12, context=ssl.create_default_context())
+        connection = PinnedHTTPS(
+            u.hostname, timeout=timeout(), context=ssl.create_default_context()
+        )
         try:
             connection.request(
                 "GET",
@@ -128,17 +138,21 @@ def fetch_public(platform, url):
                     "Accept": "text/html",
                 },
             )
+            # getresponse() detaches connection.sock on "Connection: close"; the response keeps
+            # reading from this same socket, so hold it to keep tightening the read timeout.
+            sock = getattr(connection, "sock", None)
+            if sock is not None:
+                sock.settimeout(timeout())
             response = connection.getresponse()
             if response.status in (301, 302, 303, 307, 308):
                 url = allowed_url(platform, urljoin(url, response.getheader("Location", "")))
                 continue
             body = bytearray()
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise Invalid("response_timeout")
-                if connection.sock is not None:
-                    connection.sock.settimeout(min(12, remaining))
+                limit_now = timeout()
+                # A fully read response has already released (closed) the socket.
+                if sock is not None and not response.isclosed():
+                    sock.settimeout(limit_now)
                 chunk = response.read1(min(65536, limit + 1 - len(body)))
                 if time.monotonic() >= deadline:
                     raise Invalid("response_timeout")
@@ -148,6 +162,10 @@ def fetch_public(platform, url):
                 if not chunk:
                     break
             return response.status, body.decode("utf-8", errors="replace"), url
+        except TimeoutError as exc:
+            if time.monotonic() >= deadline:
+                raise Invalid("response_timeout") from exc
+            raise
         finally:
             connection.close()
     raise Invalid("redirect_limit")
@@ -284,19 +302,24 @@ class AmazonSearchHTML(HTMLParser):
         self.url = allowed_url("amazon", url)
         self.stack, self.links = [], {}
         self.card = self.anchor = self.heading = None
-        self.tags = self.cards = 0
+        self.tags = self.cards = self.events = 0
         self.deadline = time.monotonic() + 2
 
     def check_time(self):
         if time.monotonic() >= self.deadline:
             raise Invalid("parse_limit")
 
+    def tick(self):
+        # Tagless or end-tag-only input never reaches the start tag limit; bound every callback.
+        self.events += 1
+        if self.events % 1024 == 0:
+            self.check_time()
+
     def handle_starttag(self, tag, attrs):
         self.tags += 1
         if self.tags > 20000 or len(self.stack) >= 96:
             raise Invalid("parse_limit")
-        if self.tags % 1024 == 0:
-            self.check_time()
+        self.tick()
         if tag not in self.VOID:
             self.stack.append(tag)
         attrs = dict(attrs)
@@ -340,6 +363,7 @@ class AmazonSearchHTML(HTMLParser):
             )
 
     def handle_data(self, data):
+        self.tick()
         if self.card is None:
             return
         if data.strip().lower() in ("sponsored", "スポンサー", "広告"):
@@ -351,6 +375,7 @@ class AmazonSearchHTML(HTMLParser):
                 self.heading["size"] += len(data[:remaining])
 
     def handle_endtag(self, tag):
+        self.tick()
         if tag not in self.stack:
             return
         depth = len(self.stack) - self.stack[::-1].index(tag)
@@ -451,19 +476,16 @@ class PublicAdapter:
         elif (
             lower.strip() == "captcha"
             or re.search(
-                r"<title>\s*robot check|(?:id|name)\s*=\s*['\"]captchacharacters['\"]"
-                r"|<form\b[^>]*\baction\s*=\s*['\"]/errors/validatecaptcha",
-                lower,
+                r"<title>\s*robot check|(?:id|name)\s*=\s*['\"]captchacharacters['\"]", lower
             )
-            or any(
-                x in lower
-                for x in (
-                    "<title>robot check",
-                    'id="captchacharacters"',
-                    "请完成验证码",
-                    "人間であることを確認してください",
+            # Bounded attribute run that cannot cross "<": linear on unclosed "<form " floods.
+            or (
+                "/errors/validatecaptcha" in lower
+                and re.search(
+                    r"<form\b[^<>]{0,2048}?\baction\s*=\s*['\"]/errors/validatecaptcha", lower
                 )
             )
+            or any(x in lower for x in ("请完成验证码", "人間であることを確認してください"))
         ):
             reason = "captcha"
         else:
@@ -491,9 +513,20 @@ class PublicAdapter:
         try:
             body, evidence, reason = self._fetch(url)
             candidates = []
-            if reason is None and self.platform == "amazon":
+            if (
+                reason is None
+                and self.platform == "amazon"
+                and urlsplit(evidence["url"]).path != "/s"
+            ):
+                # Product pages carry recommendation cards; only the /s layer is verified.
+                reason = "adapter_unverified"
+            elif reason is None and self.platform == "amazon":
                 parser = AmazonSearchHTML(evidence["url"])
-                parser.feed(body)
+                # One feed() of 4 MB can outrun the deadline between callbacks; chunk it.
+                for start in range(0, len(body), 65536):
+                    parser.check_time()
+                    parser.feed(body[start : start + 65536])
+                parser.check_time()
                 parser.close()
                 parser.check_time()
                 for link, (title, asin) in parser.links.items():

@@ -32,7 +32,13 @@ class Service:
         self.store, self.synthetic, self.live = store, synthetic, live
 
     def call(self, name, args):
-        supplied_task = args.get("task_id") if isinstance(args, dict) else None
+        # Echo a task only for tools whose schema accepts one; never for unknown/other tools.
+        accepts_task = (
+            isinstance(name, str)
+            and name in TOOLS
+            and "task_id" in TOOLS[name]["inputSchema"].get("properties", {})
+        )
+        supplied_task = args.get("task_id") if accepts_task and isinstance(args, dict) else None
         task = (
             supplied_task
             if isinstance(supplied_task, str) and re.fullmatch(r"task_[a-f0-9]{32}", supplied_task)
